@@ -75,3 +75,4 @@ for name, dataset in {'Level 1': df_l1, 'Level 2': df_l2, 'Level 3': df_l3}.item
     print(f"  Median length: {np.median(combined_lengths):.1f} tokens")
     print(f"  95th percentile: {np.percentile(combined_lengths, 95):.1f} tokens")
     print(f"  Max length: {max(combined_lengths)} tokens")
+
