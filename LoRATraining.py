@@ -5,15 +5,14 @@ import os
 import torch
 import logging
 import numpy as np
-import evaluate
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-from datasets import load_dataset, Dataset, DatasetDict
-
+from datasets import load_dataset
+from DifficultyProgression import DifficultyProgressionCallback, StratifiedSamplingDataset
 # Hugging Face imports
-from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, TrainingArguments, BitsAndBytesConfig, set_seed
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
-from transformers import Trainer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, TrainingArguments, set_seed
+from peft import LoraConfig, get_peft_model, TaskType
+from transformers import Trainer
 from transformers.trainer_utils import get_last_checkpoint
 
 # Custom metrics
@@ -120,36 +119,7 @@ class DataArguments:
         metadata={"help": "Sampling weight for hard examples if stratified sampling is enabled"}
     )
 
-# Custom callbacks
-class DifficultyAwareCallback(TrainerCallback):
-    """
-    Callback to track metrics by difficulty level
-    """
-    def __init__(self, eval_dataset, tokenizer, data_args):
-        self.eval_dataset = eval_dataset
-        self.tokenizer = tokenizer
-        self.data_args = data_args
-        
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        if metrics is None or self.data_args.difficulty_column is None:
-            return
-        
-        # Get model from trainer
-        model = kwargs.get("model", None)
-        if model is None:
-            return
-            
-        # Get metrics by difficulty
-        difficulty_levels = set(self.eval_dataset[self.data_args.difficulty_column])
-        
-        for difficulty in difficulty_levels:
-            difficulty_dataset = self.eval_dataset.filter(
-                lambda example: example[self.data_args.difficulty_column] == difficulty
-            )
-            
-            # Here you would compute metrics on this subset
-            # For simplicity, we're just logging the number of examples
-            logger.info(f"Difficulty {difficulty}: {len(difficulty_dataset)} examples")
+
 
 def preprocess_function(examples, tokenizer, data_args, training_args):
     """
@@ -268,47 +238,6 @@ def compute_metrics(eval_preds, tokenizer, data_args):
     
     return metrics
 
-class StratifiedSamplingDataset(torch.utils.data.Dataset):
-    """
-    Custom dataset that performs stratified sampling based on difficulty levels.
-    """
-    def __init__(self, dataset, difficulty_column, weights):
-        self.dataset = dataset
-        self.difficulty_column = difficulty_column
-        self.weights = weights
-        
-        # Group examples by difficulty
-        self.difficulty_indices = {}
-        for i, example in enumerate(self.dataset):
-            difficulty = example[self.difficulty_column]
-            if difficulty not in self.difficulty_indices:
-                self.difficulty_indices[difficulty] = []
-            self.difficulty_indices[difficulty].append(i)
-        
-        # Calculate probabilities for each group
-        total_weight = sum(weights.values())
-        self.probs = {
-            diff: weights.get(diff, 1.0) / total_weight 
-            for diff in self.difficulty_indices.keys()
-        }
-        
-        # Calculate number of examples per epoch
-        self.num_examples = len(self.dataset)
-        
-    def __len__(self):
-        return self.num_examples
-    
-    def __getitem__(self, idx):
-        # Sample difficulty level based on weights
-        difficulties = list(self.difficulty_indices.keys())
-        probs = [self.probs[d] for d in difficulties]
-        difficulty = np.random.choice(difficulties, p=probs)
-        
-        # Sample random example from that difficulty
-        indices = self.difficulty_indices[difficulty]
-        sample_idx = indices[np.random.randint(0, len(indices))]
-        
-        return self.dataset[sample_idx]
 
 def main():
     # Parse arguments
@@ -333,7 +262,6 @@ def main():
     # Load dataset
     dataset = load_dataset(
         data_args.dataset_name,
-        data_args.dataset_config_name,
         cache_dir=training_args.cache_dir
     )
     
@@ -348,37 +276,15 @@ def main():
     special_tokens = {"additional_special_tokens": ["<pytorch>", "</pytorch>", "<cuda>", "</cuda>"]}
     tokenizer.add_special_tokens(special_tokens)
     
-    # Prepare quantization config
-    if model_args.use_4bit:
-        compute_dtype = torch.float16
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
-    elif model_args.use_8bit:
-        quant_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-        )
-    else:
-        quant_config = None
-    
     # Load base model
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
-        quantization_config=quant_config,
         device_map="auto",
     )
     
     # Resize token embeddings to accommodate special tokens
     model.resize_token_embeddings(len(tokenizer))
-    
-    # Prepare model for k-bit training if using quantization
-    if model_args.use_8bit or model_args.use_4bit:
-        model = prepare_model_for_kbit_training(model)
     
     # Configure LoRA
     target_modules = [name.strip() for name in model_args.target_modules.split(",")]
@@ -412,24 +318,46 @@ def main():
     
     # Create custom dataset for stratified sampling
     if data_args.stratified_sampling and data_args.difficulty_column in dataset["train"].column_names:
+        # Define initial difficulty weights
         difficulty_weights = {
             "easy": data_args.easy_weight,
             "medium": data_args.medium_weight,
             "hard": data_args.hard_weight,
         }
+        
+        # Define target weights for the end of training
+        final_weights = {
+            "easy": 0.1,    # Less focus on easy examples
+            "medium": 0.3,  # Maintain medium examples
+            "hard": 0.6,    # More focus on hard examples
+        }
+        
+        # Create the stratified dataset
         train_dataset = StratifiedSamplingDataset(
             train_dataset, "difficulty", difficulty_weights
         )
-    
-    # Custom metrics computation
-    def compute_metrics_wrapped(eval_preds):
-        return compute_metrics(eval_preds, tokenizer, data_args)
+        
+        # Create the progression callback
+        difficulty_progression_callback = DifficultyProgressionCallback(
+            train_dataset=train_dataset,
+            initial_weights=difficulty_weights,
+            final_weights=final_weights,
+            progression_type="sigmoid",  # Smooth transition
+            warmup_epochs=1.0,           # 1 epoch of warmup
+            log_every_epoch=1            # Log every epoch
+        )
     
     # Initialize callbacks
     callbacks = []
+    
+    # Add difficulty progression callback if applicable
+    if data_args.stratified_sampling and data_args.difficulty_column in dataset["train"].column_names:
+        callbacks.append(difficulty_progression_callback)
+    
+    # Add difficulty-aware evaluation callback if applicable
     if data_args.difficulty_column in dataset["train"].column_names and eval_dataset is not None:
         callbacks.append(
-            DifficultyAwareCallback(eval_dataset, tokenizer, data_args)
+            DifficultyProgressionCallback(eval_dataset, tokenizer, data_args)
         )
     
     # Initialize Trainer
