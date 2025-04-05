@@ -4,7 +4,6 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 
 dataset = load_dataset("SakanaAI/AI-CUDA-Engineer-Archive", cache_dir="./Datasets")
-
 # Index(['Op_Name', 'Level_ID', 'Task_ID', 'Kernel_Name', 'CUDA_Runtime',
 #        'PyTorch_Native_Runtime', 'PyTorch_Compile_Runtime',
 #        'CUDA_Speedup_Native', 'CUDA_Speedup_Compile', 'CUDA_Code',
@@ -16,6 +15,8 @@ df_l1 = dataset["level_1"].to_pandas()
 df_l2 = dataset["level_2"].to_pandas()
 df_l3 = dataset["level_3"].to_pandas()
 print(df_l1.shape, df_l2.shape, df_l3.shape)
+# print(df_l1.columns)
+# print(df_l1.head(5))
 # (12157, 19) (12938, 19) (5520, 19)
 
 # Group by correct and count
@@ -23,7 +24,7 @@ print(df_l1["Correct"].value_counts())
 print(df_l2["Correct"].value_counts())
 print(df_l3["Correct"].value_counts())
 # Load the CodeLlama tokenizer
-tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-Python-hf")
+tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-13b-Python-hf")
 
 # Add special tokens to the tokenizer
 special_tokens = {
@@ -38,10 +39,10 @@ tokenizer.add_special_tokens(special_tokens)
 df_l1 = df_l1[df_l1["Correct"] == True]
 df_l2 = df_l2[df_l2["Correct"] == True]
 df_l3 = df_l3[df_l3["Correct"] == True]
-pytorch_lengths = []
-cuda_lengths = []
 
 for name, dataset in {'Level 1': df_l1, 'Level 2': df_l2, 'Level 3': df_l3}.items():  
+    pytorch_lengths = []
+    cuda_lengths = []
     for i in tqdm(range(len(dataset))):
         example = dataset.iloc[i]
         # Format with your special tokens
@@ -54,6 +55,11 @@ for name, dataset in {'Level 1': df_l1, 'Level 2': df_l2, 'Level 3': df_l3}.item
         
         pytorch_lengths.append(len(pytorch_tokens["input_ids"]))
         cuda_lengths.append(len(cuda_tokens["input_ids"]))
+        # if len(cuda_tokens["input_ids"])==5280:
+        #     print(f"Example {i}: {example['CUDA_Code']}")
+        #     print(f"CUDA tokens: {cuda_tokens['input_ids']}")
+        #     print(f"CUDA token length: {len(cuda_tokens['input_ids'])}")
+        #     print(f"PyTorch tokens: {pytorch_tokens['input_ids']}")
 
     print(f"Dataset: {name}")       
     # Calculate statistics
