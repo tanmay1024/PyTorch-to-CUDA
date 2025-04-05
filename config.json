@@ -1,0 +1,62 @@
+{
+    "model_config": {
+      "model_name_or_path": "codellama/CodeLlama-13b-hf",
+      "lora_rank": 16,
+      "lora_alpha": 32,
+      "lora_dropout": 0.05,
+      "target_modules": "q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"
+    },
+    
+    "data_config": {
+      "dataset_name": "SakanaAI/AI-CUDA-Engineer-Archive",
+      "dataset_config_name": null,
+      "pytorch_column": "PyTorch_Code_Module",
+      "cuda_column": "CUDA_Code",
+      "difficulty_column": "Level_ID",
+      "is_correct_column": "Correct",
+      "max_pytorch_length": 10000,
+      "max_cuda_length": 6000,
+      "use_contrastive": false,
+      "contrastive_loss_weight": 0.1,
+      "stratified_sampling": true
+    },
+    
+    "training_config": {
+      "output_dir": "./results",
+      "cache_dir": "./Datasets",
+      "overwrite_output_dir": true,
+      "do_train": true,
+      "do_eval": true,
+      "num_train_epochs": 3,
+      "per_device_train_batch_size": 4,
+      "per_device_eval_batch_size": 4,
+      "gradient_accumulation_steps": 4,
+      "evaluation_strategy": "steps",
+      "eval_steps": 500,
+      "save_steps": 500,
+      "warmup_steps": 100,
+      "logging_steps": 100,
+      "learning_rate": 5e-5,
+      "weight_decay": 0.01,
+      "fp16": true,
+      "report_to": "wandb",
+      "seed": 42
+    },
+    
+    "difficulty_progression": {
+      "enable": true,
+      "initial_weights": {
+        "easy": 0.6,
+        "medium": 0.3,
+        "hard": 0.1
+      },
+      "final_weights": {
+        "easy": 0.1,
+        "medium": 0.3,
+        "hard": 0.6
+      },
+      "progression_type": "sigmoid",
+      "warmup_epochs": 1.0,
+      "log_every_epoch": 1
+    }
+  }
