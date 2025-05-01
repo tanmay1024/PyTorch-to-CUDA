@@ -190,6 +190,7 @@ def main():
     )
     all_datasets = list(original_dataset.values())
     concatenated_dataset = concatenate_datasets(all_datasets)
+    concatenated_dataset = concatenated_dataset.filter(lambda example: example['Correct'] == True)
     train_test_dataset = concatenated_dataset.train_test_split(test_size=0.3, seed=42)
 
     # Further split the test into test and validation
@@ -263,16 +264,16 @@ def main():
     if difficulty_args.enable and data_args.difficulty_column in dataset["train"].column_names:
         # Define initial difficulty weights
         difficulty_weights = {
-            "1": difficulty_args.initial_weights.easy,
-            "2": difficulty_args.initial_weights.medium,
-            "3": difficulty_args.initial_weights.hard
+            "easy": difficulty_args.initial_weights.easy,
+            "medium": difficulty_args.initial_weights.medium,
+            "hard": difficulty_args.initial_weights.hard
         }
         
         # Define target weights for the end of training
         final_weights = {
-            "1": difficulty_args.final_weights.easy,
-            "2": difficulty_args.final_weights.medium,
-            "3": difficulty_args.final_weights.hard
+            "easy": difficulty_args.final_weights.easy,
+            "medium": difficulty_args.final_weights.medium,
+            "hard": difficulty_args.final_weights.hard
         }
         
         # Create the stratified dataset
