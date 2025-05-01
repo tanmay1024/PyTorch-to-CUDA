@@ -2,6 +2,7 @@
 # coding=utf-8
 
 import os
+import sys
 import json
 import argparse
 import logging
@@ -15,6 +16,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, 
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import Trainer
 from transformers.trainer_utils import get_last_checkpoint
+from TrainingArgs import ModelArguments, DataArguments, DifficultyProgressionArguments # Import new dataclasses
 
 # Custom metrics
 import re
@@ -23,103 +25,6 @@ import Levenshtein
 
 # Set up logging
 logger = logging.getLogger(__name__)
-
-@dataclass
-class ModelArguments:
-    """
-    Arguments for the model configuration.
-    """
-    model_name_or_path: str = field(
-        default="codellama/CodeLlama-13b-hf",
-        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
-    )
-    use_8bit: bool = field(
-        default=True,
-        metadata={"help": "Use 8-bit quantization to reduce memory usage"}
-    )
-    use_4bit: bool = field(
-        default=False, 
-        metadata={"help": "Use 4-bit quantization (QLoRA)"}
-    )
-    lora_rank: int = field(
-        default=16,
-        metadata={"help": "Rank parameter for LoRA adaptation"}
-    )
-    lora_alpha: int = field(
-        default=32,
-        metadata={"help": "Alpha parameter for LoRA adaptation"}
-    )
-    lora_dropout: float = field(
-        default=0.05,
-        metadata={"help": "Dropout probability for LoRA layers"}
-    )
-    target_modules: str = field(
-        default="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj",
-        metadata={"help": "Comma-separated list of module names to apply LoRA to"}
-    )
-
-@dataclass
-class DataArguments:
-    """
-    Arguments for dataset configuration.
-    """
-    dataset_name: str = field(
-        default=None,
-        metadata={"help": "The name of the dataset to use (via the datasets library)"}
-    )
-    dataset_config_name: Optional[str] = field(
-        default=None,
-        metadata={"help": "The configuration name of the dataset to use"}
-    )
-    pytorch_column: str = field(
-        default="pytorch_code",
-        metadata={"help": "Column in the dataset that contains PyTorch code"}
-    )
-    cuda_column: str = field(
-        default="cuda_code",
-        metadata={"help": "Column in the dataset that contains CUDA code"}
-    )
-    difficulty_column: Optional[str] = field(
-        default="difficulty",
-        metadata={"help": "Column that indicates the difficulty level (if available)"}
-    )
-    is_correct_column: Optional[str] = field(
-        default="is_correct",
-        metadata={"help": "Column that indicates if this is a correct translation (for contrastive examples)"}
-    )
-    max_pytorch_length: int = field(
-        default=1024,
-        metadata={"help": "Maximum length for PyTorch code"}
-    )
-    max_cuda_length: int = field(
-        default=1536,
-        metadata={"help": "Maximum length for CUDA code (usually longer than PyTorch)"}
-    )
-    contrastive_loss_weight: float = field(
-        default=0.1,
-        metadata={"help": "Weight of contrastive loss component (if using contrastive learning)"}
-    )
-    use_contrastive: bool = field(
-        default=False,
-        metadata={"help": "Whether to use contrastive learning with correct/incorrect examples"}
-    )
-    stratified_sampling: bool = field(
-        default=True,
-        metadata={"help": "Whether to use stratified sampling based on difficulty levels"}
-    )
-    easy_weight: float = field(
-        default=0.2,
-        metadata={"help": "Sampling weight for easy examples if stratified sampling is enabled"}
-    )
-    medium_weight: float = field(
-        default=0.3,
-        metadata={"help": "Sampling weight for medium examples if stratified sampling is enabled"}
-    )
-    hard_weight: float = field(
-        default=0.5,
-        metadata={"help": "Sampling weight for hard examples if stratified sampling is enabled"}
-    )
-
 
 
 def preprocess_function(examples, tokenizer, data_config, training_config):
@@ -242,33 +147,46 @@ def compute_metrics(eval_preds, tokenizer, data_config):
 
 def main():
     # Parse arguments
-    parser = argparse.ArgumentParser(description="Train a PyTorch to CUDA translation model")
-    parser.add_argument(
-        "--config", type=str, default="config.json", 
-        help="Path to configuration JSON file"
+    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments, DifficultyProgressionArguments))
+
+    # If args are provided via config file using HfArgumentParser format:
+    # model_args, data_args, training_args, difficulty_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    # Or parse from command line:
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+        # If we pass only one argument path to json file, load from it
+        logger.info(f"Loading arguments from config file: {sys.argv[1]}")
+        model_args, data_args, training_args, difficulty_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    else:
+        logger.info("Parsing arguments from command line.")
+        model_args, data_args, training_args, difficulty_args = parser.parse_args_into_dataclasses()
+
+    # Setup logging level based on training args
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    # datasets.utils.logging.set_verbosity(log_level)
+    # transformers.utils.logging.set_verbosity(log_level)
+    # transformers.utils.logging.enable_default_handler()
+    # transformers.utils.logging.enable_explicit_format()
+
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f" distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+        + f" 4-bits training: {model_args.use_4bit}, 8-bits training: {model_args.use_8bit}"
     )
-    
-    args = parser.parse_args()
-    
-    # Load configuration
-    logger.info(f"Loading configuration from {args.config}")
-    with open(args.config, 'r') as f:
-        config = json.load(f)
-    
-    # Extract configuration sections
-    model_config = config["model_config"]
-    data_config = config["data_config"]
-    training_config = config["training_config"]
-    difficulty_config = config.get("difficulty_progression", {"enable": False})
-    
-    set_seed(training_config.get("seed", 42))
-    
+    logger.info(f"Training/evaluation parameters {training_args}")
+    logger.info(f"Model parameters {model_args}")
+    logger.info(f"Data parameters {data_args}")
+    logger.info(f"Difficulty progression parameters {difficulty_args}")
+
+    # Set seed before initializing model.
+    set_seed(training_args.seed)
+
     # Load dataset
-    logger.info(f"Loading dataset: {data_config['dataset_name']}")
+    logger.info(f"Loading dataset: {data_args.dataset_name}")
     original_dataset = load_dataset(
-        data_config["dataset_name"],
-        data_config["dataset_config_name"],
-        cache_dir=training_config.get("cache_dir")
+        data_args.dataset_name,
+        data_args.dataset_config_name,
+        cache_dir=model_args.cache_dir
     )
     all_datasets = list(original_dataset.values())
     concatenated_dataset = concatenate_datasets(all_datasets)
@@ -285,10 +203,10 @@ def main():
     })
 
     # Load tokenizer
-    logger.info(f"Loading tokenizer: {model_config['model_name_or_path']}")
+    logger.info(f"Loading tokenizer: {model_args.model_name_or_path}")
     tokenizer = AutoTokenizer.from_pretrained(
-        model_config["model_name_or_path"],
-        cache_dir=training_config.get("cache_dir"),
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
         use_fast=True,
     )
     
@@ -298,8 +216,8 @@ def main():
     
     # Load base model
     model = AutoModelForCausalLM.from_pretrained(
-        model_config.model_name_or_path,
-        cache_dir=training_config.cache_dir,
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
         device_map="auto",
     )
     
@@ -307,14 +225,14 @@ def main():
     model.resize_token_embeddings(len(tokenizer))
     
     # Configure LoRA
-    target_modules = [name.strip() for name in model_config.target_modules.split(",")]
+    # target_modules = [name.strip() for name in model_args.target_modules]
     lora_config = LoraConfig(
-        r=model_config.lora_rank,
-        lora_alpha=model_config.lora_alpha,
-        lora_dropout=model_config.lora_dropout,
+        r=model_args.lora_rank,
+        lora_alpha=model_args.lora_alpha,
+        lora_dropout=model_args.lora_dropout,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
-        target_modules=target_modules,
+        target_modules=model_args.target_modules,
     )
     model = get_peft_model(model, lora_config)
     
@@ -323,7 +241,7 @@ def main():
     
     # Process the datasets
     preprocess_function_wrapped = lambda examples: preprocess_function(
-        examples, tokenizer, data_config, training_config
+        examples, tokenizer, data_args, training_args
     )
     
     processed_datasets = dataset.map(
@@ -334,27 +252,32 @@ def main():
     )
     
     train_dataset = processed_datasets["train"]
-    eval_dataset = processed_datasets["validation"] if "validation" in processed_datasets else None
+    eval_dataset = processed_datasets["validation"]
     
+    logger.info("Setting up evaluation metrics")
+    compute_metrics_wrapped = lambda eval_preds: compute_metrics(
+        eval_preds, tokenizer, data_args
+    )
+
     # Create custom dataset for stratified sampling
-    if data_config.stratified_sampling and data_config.difficulty_column in dataset["train"].column_names:
+    if difficulty_args.enable and data_args.difficulty_column in dataset["train"].column_names:
         # Define initial difficulty weights
         difficulty_weights = {
-            "1": data_config.easy_weight,
-            "2": data_config.medium_weight,
-            "3": data_config.hard_weight,
+            "1": difficulty_args.initial_weights.easy,
+            "2": difficulty_args.initial_weights.medium,
+            "3": difficulty_args.initial_weights.hard
         }
         
         # Define target weights for the end of training
         final_weights = {
-            "1": 0.1,    # Less focus on easy examples
-            "2": 0.3,  # Maintain medium examples
-            "3": 0.6,    # More focus on hard examples
+            "1": difficulty_args.final_weights.easy,
+            "2": difficulty_args.final_weights.medium,
+            "3": difficulty_args.final_weights.hard
         }
         
         # Create the stratified dataset
         train_dataset = StratifiedSamplingDataset(
-            train_dataset, data_config.difficulty_column, difficulty_weights
+            train_dataset, data_args.difficulty_column, difficulty_weights
         )
         
         # Create the progression callback
@@ -371,32 +294,32 @@ def main():
     callbacks = []
     
     # Add difficulty progression callback if applicable
-    if data_config.stratified_sampling and data_config.difficulty_column in dataset["train"].column_names:
+    if data_args.stratified_sampling and data_args.difficulty_column in dataset["train"].column_names:
         callbacks.append(difficulty_progression_callback)
     
-    # Add difficulty-aware evaluation callback if applicable
-    if data_config.difficulty_column in dataset["train"].column_names and eval_dataset is not None:
-        callbacks.append(
-            DifficultyProgressionCallback(eval_dataset, tokenizer, data_config)
-        )
+    # # Add difficulty-aware evaluation callback if applicable
+    # if data_config.difficulty_column in dataset["train"].column_names and eval_dataset is not None:
+    #     callbacks.append(
+    #         DifficultyProgressionCallback(eval_dataset, tokenizer, data_config)
+    #     )
     
     # Initialize Trainer
     trainer = Trainer(
         model=model,
-        args=training_config,
+        args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
-        compute_metrics=compute_metrics_wrapped if training_config.do_eval else None,
+        compute_metrics=compute_metrics_wrapped if training_args.do_eval else None,
         callbacks=callbacks,
     )
     
     # Training
-    if training_config.do_train:
+    if training_args.do_train:
         checkpoint = None
-        if training_config.resume_from_checkpoint is not None:
-            checkpoint = training_config.resume_from_checkpoint
-        elif last_checkpoint := get_last_checkpoint(training_config.output_dir):
+        if training_args.resume_from_checkpoint is not None:
+            checkpoint = training_args.resume_from_checkpoint
+        elif last_checkpoint := get_last_checkpoint(training_args.output_dir):
             checkpoint = last_checkpoint
             
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
@@ -408,7 +331,7 @@ def main():
         trainer.save_state()
     
     # Evaluation
-    if training_config.do_eval:
+    if training_args.do_eval:
         logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()
         
